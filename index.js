@@ -1,45 +1,68 @@
+import express from 'express';
 import {
   Client,
+  EmbedBuilder,
   GatewayIntentBits,
-  PermissionsBitField,
-  EmbedBuilder
+  PermissionsBitField
 } from 'discord.js';
+import dotenv from 'dotenv';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import dotenv from 'dotenv';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const BASE_DIR = '/home/node404/bots/BanCannon';
 
-const BAN_COUNTS_FILE = path.join(BASE_DIR, 'banCounts.json');
-const BAN_EXTRA_CODES_FILE = path.join(BASE_DIR, 'banExtraCodes.json');
-const BAN_EXTRA_GUILDS_FILE = path.join(BASE_DIR, 'banExtraServers.json');
+const DATA_DIR = __dirname;
+const DAILY_LIMITS = {
+  free: 2,
+  extra: 5
+};
+
+const FILES = {
+  counts: path.join(DATA_DIR, 'banCounts.json'),
+  extraCodes: path.join(DATA_DIR, 'banExtraCodes.json'),
+  extraGuilds: path.join(DATA_DIR, 'banExtraServers.json')
+};
+
+const COMMANDS = {
+  ban: '!bancannon',
+  redeem: '!bantier redeem',
+  status: '!bantier status',
+  redneckCheck: '!redneckcheck'
+};
+
+const REMOTE_IMAGES = {
+  banBlast: 'https://cdn.discordapp.com/attachments/1090553463076831233/1388676139706224801/cannon-blast-ezgif.com-optimize.gif',
+  redneckCheck: 'https://cdn.discordapp.com/attachments/1090553463076831233/1392365368416403578/200.webp'
+};
 
 let banCounts = {};
 let banExtraCodes = new Set();
 let banExtraGuilds = new Set();
+let botReady = false;
 
-async function loadData() {
-  try {
-    if (await fileExists(BAN_COUNTS_FILE)) {
-      banCounts = JSON.parse(await fs.readFile(BAN_COUNTS_FILE, 'utf8'));
-    }
-    if (await fileExists(BAN_EXTRA_CODES_FILE)) {
-      banExtraCodes = new Set(JSON.parse(await fs.readFile(BAN_EXTRA_CODES_FILE, 'utf8')));
-    }
-    if (await fileExists(BAN_EXTRA_GUILDS_FILE)) {
-      banExtraGuilds = new Set(JSON.parse(await fs.readFile(BAN_EXTRA_GUILDS_FILE, 'utf8')));
-    }
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers
+  ]
+});
 
-    console.log('🔍 Loaded banExtraCodes:', [...banExtraCodes]);
-    console.log('🔍 Loaded banExtraGuilds:', [...banExtraGuilds]);
-  } catch (err) {
-    console.error('❌ Error loading saved data:', err);
-  }
+function getGuildTier(guildId) {
+  return banExtraGuilds.has(guildId) ? 'extra' : 'free';
+}
+
+function getBanLimitForTier(tier) {
+  return DAILY_LIMITS[tier] ?? DAILY_LIMITS.free;
+}
+
+function randomItem(items) {
+  return items[Math.floor(Math.random() * items.length)];
 }
 
 async function fileExists(filePath) {
@@ -51,207 +74,277 @@ async function fileExists(filePath) {
   }
 }
 
+async function readJsonFile(filePath, fallback) {
+  if (!(await fileExists(filePath))) {
+    return fallback;
+  }
+
+  try {
+    const raw = await fs.readFile(filePath, 'utf8');
+    return JSON.parse(raw);
+  } catch (error) {
+    console.error(`Failed to read ${path.basename(filePath)}:`, error);
+    return fallback;
+  }
+}
+
+async function writeJsonFile(filePath, data) {
+  await fs.writeFile(filePath, `${JSON.stringify(data, null, 2)}\n`);
+}
+
+async function loadData() {
+  banCounts = await readJsonFile(FILES.counts, {});
+  banExtraCodes = new Set(await readJsonFile(FILES.extraCodes, []));
+  banExtraGuilds = new Set(await readJsonFile(FILES.extraGuilds, []));
+
+  console.log('Loaded ban data:', {
+    extraCodes: banExtraCodes.size,
+    extraGuilds: banExtraGuilds.size
+  });
+}
+
 async function saveBanCounts() {
   try {
-    await fs.writeFile(BAN_COUNTS_FILE, JSON.stringify(banCounts, null, 2));
-  } catch (err) {
-    console.error('❌ Failed to save banCounts.json:', err);
+    await writeJsonFile(FILES.counts, banCounts);
+  } catch (error) {
+    console.error('Failed to save banCounts.json:', error);
   }
 }
 
 async function saveExtraFiles() {
   try {
-    await fs.writeFile(BAN_EXTRA_CODES_FILE, JSON.stringify([...banExtraCodes], null, 2));
-    await fs.writeFile(BAN_EXTRA_GUILDS_FILE, JSON.stringify([...banExtraGuilds], null, 2));
-  } catch (err) {
-    console.error('❌ Failed to save extra files:', err);
+    await Promise.all([
+      writeJsonFile(FILES.extraCodes, [...banExtraCodes]),
+      writeJsonFile(FILES.extraGuilds, [...banExtraGuilds])
+    ]);
+  } catch (error) {
+    console.error('Failed to save BanCannon Extra files:', error);
   }
-}
-
-function getGuildTier(guildId) {
-  return banExtraGuilds.has(guildId) ? 'extra' : 'free';
-}
-
-function getBanLimitForTier(tier) {
-  return tier === 'extra' ? 5 : 2;
-}
-
-function getRandomItem(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
 }
 
 function getPermissionDeniedMessage(tier) {
-  const messages = [
-    "**MISCAST ERROR!**\n> You hath failed to `@` a target. The Ban Cannon sputters, confused and disappointed. Even the scrolls are laughing.",
-    "**Arcane Protocol Breach:**\n> No target sigil detected. You must inscribe the name (`@user`) of the one to be banished, lest the cannon sleep forevermore.",
-    "**The Beard Rejects You.**\n> You summoned the Ban Cannon without a name. That's like casting *Fireball* with no target and setting your own robe ablaze.",
-    "**Insufficient Beard Energy Detected.**\n> The cannon requires a properly tagged victim to lock onto. As it stands, you've cast `Banish()` with null syntax. Rookie mistake.",
-    "**Fatal Beard Exception**\n> `@Target` parameter missing. The Cannon reboots in shame. Consult the sacred Patch Notes before embarrassing yourself further.",
-    "**Scrying Failed!**\n> No trace of a foe could be divined. You must `@` their true name, lest your spell fizzle like a damp firecracker in a tavern urinal."
+  const extraMessages = [
+    '**Miscast Error**\n> No target was provided. The cannon refuses to fire into the void.',
+    '**Arcane Protocol Breach**\n> You need to mention a valid target before the cannon will arm.',
+    '**Fatal Beard Exception**\n> The cannon tried to lock on and found nothing to ban.',
+    '**Scrying Failed**\n> No target sigil detected. Please tag the user you want to ban.'
   ];
 
-  return tier === 'extra'
-    ? getRandomItem(messages)
-    : "Nice try, initiate. But without the sacred Beard of Credibility and the Scroll of Passive-Aggressive Patch Notes, the Ban Cannon shall not heed your feeble click.";
+  if (tier === 'extra') {
+    return randomItem(extraMessages);
+  }
+
+  return 'Nice try. You need the proper permissions and a valid target before the cannon will fire.';
 }
 
 function scheduleDailyReset() {
-  const now = new Date();
-  const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-  const delay = nextMidnight - now;
+  const resetAtMidnight = () => {
+    const now = new Date();
+    const nextMidnight = new Date(now);
+    nextMidnight.setHours(24, 0, 0, 0);
 
-  setTimeout(() => {
-    banCounts = {};
-    saveBanCounts();
-    console.log('🔄 Ban counts reset at midnight.');
+    const delay = nextMidnight.getTime() - now.getTime();
 
-    setInterval(() => {
+    setTimeout(async () => {
       banCounts = {};
-      saveBanCounts();
-      console.log('🔄 Ban counts reset at midnight.');
-    }, 24 * 60 * 60 * 1000);
-  }, delay);
+      await saveBanCounts();
+      console.log('Daily ban counts reset.');
+      resetAtMidnight();
+    }, delay);
+  };
+
+  resetAtMidnight();
+}
+
+function startHealthServer() {
+  const app = express();
+  const port = Number(process.env.PORT ?? 3000);
+
+  app.get('/healthz', (_req, res) => {
+    res.status(botReady ? 200 : 503).json({ ok: botReady, bot: 'BanCannon' });
+  });
+
+  app.get('/', (_req, res) => {
+    res.type('text').send('BanCannon is running.');
+  });
+
+  app.listen(port, () => {
+    console.log(`Health server listening on port ${port}`);
+  });
 }
 
 async function handleBanCannon(message) {
-  const guildId = message.guild.id;
+  const guild = message.guild;
+  const guildId = guild.id;
   const guildTier = getGuildTier(guildId);
   const maxBans = getBanLimitForTier(guildTier);
 
-  if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) {
+  if (!message.member?.permissions?.has(PermissionsBitField.Flags.BanMembers)) {
     return message.reply(getPermissionDeniedMessage(guildTier));
   }
 
-  const user = message.mentions.users.first();
-  if (!user) return message.reply(getPermissionDeniedMessage(guildTier));
-
-  const userId = message.author.id;
-  banCounts[guildId] = banCounts[guildId] || {};
-  banCounts[guildId][userId] = banCounts[guildId][userId] || 0;
-
-  if (banCounts[guildId][userId] >= maxBans) {
-    return message.reply(`⚠️ Ban Cannon cooldown: ${maxBans} daily uses reached. Try again tomorrow!`);
+  const targetUser = message.mentions.users.first();
+  if (!targetUser) {
+    return message.reply(getPermissionDeniedMessage(guildTier));
   }
 
-  const member = message.guild.members.cache.get(user.id);
-  if (!member) return message.reply("🧾 User not found in this server.");
-  if (!member.bannable) return message.reply("❌YOU HAVE ATTEMPTED A FORBIDDEN BAN!! THE BEARDS HAVE BEEN NOTIFED!!!");
+  const authorId = message.author.id;
+  banCounts[guildId] ??= {};
+  banCounts[guildId][authorId] ??= 0;
+
+  if (banCounts[guildId][authorId] >= maxBans) {
+    return message.reply(`Ban Cannon cooldown: you have used all ${maxBans} daily charges. Try again tomorrow.`);
+  }
+
+  let targetMember;
+  try {
+    targetMember = await guild.members.fetch(targetUser.id);
+  } catch {
+    return message.reply('User not found in this server.');
+  }
+
+  if (!targetMember.bannable) {
+    return message.reply('I cannot ban that member.');
+  }
 
   try {
-    await member.ban({ reason: 'Struck by the Ban Cannon!' });
-    banCounts[guildId][userId]++;
+    await targetMember.ban({ reason: 'Struck by the Ban Cannon.' });
+    banCounts[guildId][authorId] += 1;
     await saveBanCounts();
 
     const embed = new EmbedBuilder()
-      .setTitle('🔨 ARCANE BEARD CANNON DEPLOYED!')
-      .setDescription(`**${user.tag} has been beardblasted into nonexistence. RIP.**`)
-      .setImage('https://cdn.discordapp.com/attachments/1090553463076831233/1388676139706224801/cannon-blast-ezgif.com-optimize.gif')
+      .setTitle('Ban Cannon Deployed')
+      .setDescription(`**${targetUser} has been beard-blasted into nonexistence.**`)
+      .setImage(REMOTE_IMAGES.banBlast)
       .setColor(0xff0000)
       .setFooter({ text: 'Let this be a warning to all who post without honor.' });
 
     return message.channel.send({ embeds: [embed] });
-  } catch (err) {
-    console.error('❌ Ban failed:', err);
-    return message.reply('The Cannon failed me... Summon the Architect.');
+  } catch (error) {
+    console.error('Ban failed:', error);
+    return message.reply('The cannon failed. Please try again or check permissions.');
   }
 }
 
 async function handleRedeem(message) {
-  const code = message.content.trim().split(' ')[2];
+  const parts = message.content.trim().split(/\s+/);
+  const code = parts[2];
   const guildId = message.guild.id;
 
-  if (!code) return message.reply("🔑 You must provide a code. Try `!bantier redeem YOURCODE`.");
-  if (!banExtraCodes.has(code)) return message.reply("❌ Invalid or used BanCannon Extra code.");
-  if (banExtraGuilds.has(guildId)) return message.reply("⚡ This server already has BanCannon Extra.");
+  if (!code) {
+    return message.reply('You must provide a code. Try `!bantier redeem YOURCODE`.');
+  }
+
+  if (!banExtraCodes.has(code)) {
+    return message.reply('Invalid or already used BanCannon Extra code.');
+  }
+
+  if (banExtraGuilds.has(guildId)) {
+    return message.reply('This server already has BanCannon Extra.');
+  }
 
   banExtraGuilds.add(guildId);
   banExtraCodes.delete(code);
   await saveExtraFiles();
 
-  return message.reply("🎉 This server now wields **BanCannon Extra** — five daily bans, spicy misfire messages, and supreme beard power.");
+  return message.reply('This server now has BanCannon Extra: five daily bans and extra misfire messages.');
 }
 
 async function handleStatus(message) {
   const tier = getGuildTier(message.guild.id);
-  return message.reply(`🧠 This server currently has **BanCannon ${tier === 'extra' ? 'Extra' : 'Free'}**.`);
+  return message.reply(`This server currently has BanCannon ${tier === 'extra' ? 'Extra' : 'Free'}.`);
 }
 
 async function handleRedneckCheck(message) {
   const jokes = [
-    "You might be a redneck if your house has wheels but your truck don’t.",
-    "You might be a redneck if you’ve ever mowed the lawn and found a car.",
-    "You might be a redneck if your family tree doesn’t fork.",
-    "You might be a redneck if your front porch collapses and kills more than five dogs.",
-    "You might be a redneck if your idea of a family reunion is meeting up at the Waffle House.",
-    "You might be a redneck if you’ve ever used duct tape as a medical tool.",
-    "You might be a redneck if you think a ‘semi-automatic’ is a fancy washing machine.",
-    "You might be a redneck if your dog and your pickup truck are both named Earl.",
-    "You might be a redneck if you've ever used a mattress as a swimming pool raft.",
-    "You might be a redneck if you think ‘Wi-Fi’ is a brand of jerky.",
-    "You might be a redneck if your wedding had a bait table instead of a cake table.",
-    "You might be a redneck if your lawnmower has a cupholder but your car doesn’t.",
-    "You might be a redneck if your Christmas lights are still up — and it’s July.",
-    "You might be a redneck if your home security system is a goose with an attitude.",
-    "You might be a redneck if you’ve ever barbecued in the rain and called it a ‘storm cookout.’",
-    "You might be a redneck if your bathroom reading shelf has more hunting magazines than toilet paper.",
-    "You might be a redneck if your idea of a hot tub is a kiddie pool and a kettle.",
-    "You might be a redneck if your truck has more stickers than paint.",
-    "You might be a redneck if your garage doubles as a chicken coop.",
-    "You might be a redneck if your internet goes out every time the microwave runs."
+    'You might be a redneck if your house has wheels but your truck does not.',
+    'You might be a redneck if you have ever mowed the lawn and found a car.',
+    'You might be a redneck if your family tree does not fork.',
+    'You might be a redneck if your front porch collapses and takes out more than five dogs.',
+    'You might be a redneck if your idea of a family reunion is the Waffle House.',
+    'You might be a redneck if you have ever used duct tape as a medical tool.',
+    'You might be a redneck if you think a semi-automatic is a fancy washing machine.',
+    'You might be a redneck if your dog and your pickup truck are both named Earl.',
+    'You might be a redneck if you have ever used a mattress as a swimming pool raft.',
+    'You might be a redneck if you think Wi-Fi is a brand of jerky.',
+    'You might be a redneck if your wedding had a bait table instead of a cake table.',
+    'You might be a redneck if your lawnmower has a cupholder but your car does not.',
+    'You might be a redneck if your Christmas lights are still up and it is July.',
+    'You might be a redneck if your home security system is a goose with an attitude.',
+    'You might be a redneck if you have ever barbecued in the rain and called it a storm cookout.',
+    'You might be a redneck if your bathroom reading shelf has more hunting magazines than toilet paper.',
+    'You might be a redneck if your idea of a hot tub is a kiddie pool and a kettle.',
+    'You might be a redneck if your truck has more stickers than paint.',
+    'You might be a redneck if your garage doubles as a chicken coop.',
+    'You might be a redneck if your internet goes out every time the microwave runs.'
   ];
 
   const embed = new EmbedBuilder()
-    .setTitle('🎯 REDNECK CHECK COMPLETE')
-    .setDescription(`**${getRandomItem(jokes)}**`)
-    .setImage('https://cdn.discordapp.com/attachments/1090553463076831233/1392365368416403578/200.webp')
+    .setTitle('Redneck Check Complete')
+    .setDescription(`**${randomItem(jokes)}**`)
+    .setImage(REMOTE_IMAGES.redneckCheck)
     .setColor(0xff5500);
 
   return message.channel.send({ embeds: [embed] });
 }
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers
-  ]
-});
+client.once('ready', async () => {
+  console.log(`Logged in as ${client.user.tag}. Ban Cannon is ready.`);
+  botReady = true;
 
-client.once('ready', () => {
-  console.log(`🔨 Logged in as ${client.user.tag} — The Ban Cannon is ready!`);
   client.user.setPresence({
-    activities: [{ name: 'with its Beard.' }],
+    activities: [{ name: 'with its Beard' }],
     status: 'online'
   });
+
   scheduleDailyReset();
 });
 
 client.on('messageCreate', async message => {
-  if (message.author.bot || !message.guild) return;
+  if (message.author.bot || !message.guild) {
+    return;
+  }
 
-  const lower = message.content.toLowerCase();
-  if (lower.startsWith('!bancannon')) return await handleBanCannon(message);
-  if (lower.startsWith('!bantier redeem')) return await handleRedeem(message);
-  if (lower === '!bantier status') return await handleStatus(message);
-  if (lower === '!redneckcheck') return await handleRedneckCheck(message);
+  const content = message.content.trim().toLowerCase();
+
+  if (content.startsWith(COMMANDS.ban)) {
+    return handleBanCannon(message);
+  }
+
+  if (content.startsWith(COMMANDS.redeem)) {
+    return handleRedeem(message);
+  }
+
+  if (content === COMMANDS.status) {
+    return handleStatus(message);
+  }
+
+  if (content === COMMANDS.redneckCheck) {
+    return handleRedneckCheck(message);
+  }
 });
 
 client.on('guildMemberAdd', async member => {
- const welcomeChannel = member.guild.systemChannel ||
-  member.guild.channels.cache.find(c => c.name.includes("welcome") && c.isTextBased());
+  const welcomeChannel =
+    member.guild.systemChannel ||
+    member.guild.channels.cache.find(channel => channel.isTextBased() && channel.name.toLowerCase().includes('welcome'));
 
-if(!welcomeChannel) return;
+  if (!welcomeChannel) {
+    return;
+  }
 
- const message = `
-  Welcome to ${member.guild.name}, ${member.user}!
+  const message = [
+    `Welcome to ${member.guild.name}, ${member.user}!`,
+    '',
+    'If you found your way here through an invite link, contact an admin to get your role.',
+    'If you leave without a valid role, you will need to rejoin through the invite link and try again.'
+  ].join('\n');
 
-  If you found your way here through an invite link contact an admin to get your role to stay.
-  If you choose to leave without a valid role you will need to rejoin through the invite link and try again.
-  `;
-
-  welcomeChannel.send({ content: message }).catch(console.error);
+  welcomeChannel.send({ content: message }).catch(error => {
+    console.error('Failed to send welcome message:', error);
+  });
 });
 
+startHealthServer();
 await loadData();
-client.login(process.env.BOT_TOKEN);
+await client.login(process.env.BOT_TOKEN);
